@@ -174,6 +174,84 @@ class CEllipse(ShapeBase):
         return (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1.0
 
 
+class Group(IShape):
+    def __init__(self, children: List[IShape]):
+        self._children: List[IShape] = list(children)
+        self._selected = False
+
+    # --- selection ---
+    def set_selected(self, v):
+        self._selected = bool(v)
+
+    def is_selected(self):
+        return self._selected
+
+    # --- colors: применяем ко всем детям ---
+    def set_fill_color(self, color):
+        for ch in self._children:
+            ch.set_fill_color(color)
+
+    def set_line_color(self, color):
+        for ch in self._children:
+            ch.set_line_color(color)
+
+    # --- geometry helpers ---
+    def rect(self):
+        if not self._children:
+            return QRect(0, 0, 0, 0)
+
+        r = self._children[0].rect()
+        left = r.left()
+        top = r.top()
+        right = r.right()
+        bottom = r.bottom()
+
+        for ch in self._children[1:]:
+            cr = ch.rect()
+            left = min(left, cr.left())
+            top = min(top, cr.top())
+            right = max(right, cr.right())
+            bottom = max(bottom, cr.bottom())
+
+        return QRect(QPoint(left, top), QPoint(right, bottom)).normalized()
+
+    def contains(self, pt):
+        # на этапе 1: попадание по любому ребёнку
+        for ch in reversed(self._children):
+            if ch.contains(pt):
+                return True
+        return False
+
+    def draw(self, p):
+        for ch in self._children:
+            ch.draw(p)
+
+    def move(self, dx, dy, bounds):
+        # этап 1: просто двигаем всех детей (bounds-контроль будет на этапе 2)
+        for ch in self._children:
+            ch.move(dx, dy, bounds)
+
+    def change_size(self, d, bounds):
+        # этап 1: просто меняем размер у всех детей
+        for ch in self._children:
+            ch.change_size(d, bounds)
+
+    def set_rect(self, rect, bounds=None):
+        """
+        Чтобы Canvas мог ресайзить группу, делаем простую интерпретацию:
+        set_rect двигает группу так, чтобы её topLeft совпал с rect.topLeft.
+        (Нормальный resize группы будем делать на этапе 2/дальше, если нужно.)
+        """
+        cur = self.rect()
+        dx = rect.left() - cur.left()
+        dy = rect.top() - cur.top()
+        self.move(dx, dy, bounds if bounds is not None else QRect())
+
+    # удобный доступ для ungroup
+    def children(self):
+        return list(self._children)
+
+
 class MyStorage:
     def __init__(self):
         self._items: List[IShape] = []
