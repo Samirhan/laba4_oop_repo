@@ -3,11 +3,11 @@ import sys
 from abc import ABC, abstractmethod
 
 from typing import List
-
+import os
+import importlib.util
 from PySide6.QtCore import QPoint, QRect, Qt
-from PySide6.QtGui import QPainter, QPen, QBrush, QKeySequence, QAction, QActionGroup, QColor
-from PySide6.QtWidgets import QApplication, QWidget, QMainWindow, QColorDialog, QToolBar
-
+from PySide6.QtGui import QPainter, QPen, QBrush, QKeySequence, QAction, QActionGroup, QColor, QUndoStack, QUndoCommand
+from PySide6.QtWidgets import QApplication, QWidget, QMainWindow, QColorDialog, QToolBar, QMessageBox, QFileDialog
 
 
 class IShape(ABC):
@@ -41,6 +41,14 @@ class IShape(ABC):
     @abstractmethod
     def set_line_color(self, color): ...
 
+    @abstractmethod
+    def type_name(self): ...
+
+    @abstractmethod
+    def save(self, stream): ...
+
+    @abstractmethod
+    def load(self, stream, factory = None): ...
 
 
 
@@ -80,7 +88,7 @@ class ShapeBase(IShape):
         self._rect = new_rect
 
 
-    def move(self, dx, dy, bounds):
+    def move(self, dx, dy, bounds = None):
         moved = self._rect.translated(dx, dy)
         self.set_rect(moved, bounds)
 
@@ -91,6 +99,34 @@ class ShapeBase(IShape):
         grown = QRect(r.left() - d, r.top() - d,r.width() + 2 * d, r.height() + 2 * d,)
         self.set_rect(grown, bounds)
 
+    def type_name(self):
+        return "shape_base"
+
+    def save(self, stream):
+        r = self._rect
+        stream.write(f"{r.left()} {r.top()} {r.width()} {r.height()}\n")
+
+        lc = self._line_color
+        fc = self._fill_color
+        stream.write(f"{lc.red()} {lc.green()} {lc.blue()} {lc.alpha()}\n")
+        stream.write(f"{fc.red()} {fc.green()} {fc.blue()} {fc.alpha()}\n")
+
+    def load(self, stream, factory = None):
+        x, y, w, h = map(int, stream.readline().split())
+        self._rect = QRect(x, y, w, h).normalized()
+
+        lr, lg, lb, la = map(int, stream.readline().split())
+        fr, fg, fb, fa = map(int, stream.readline().split())
+
+        self._line_color = QColor(lr, lg, lb, la)
+        self._fill_color = QColor(fr, fg, fb, fa)
+        self._selected = False
+
+    def fill_color(self):
+        return QColor(self._fill_color)
+
+    def line_color(self):
+        return QColor(self._line_color)
 
 
 class CCircle(ShapeBase):
@@ -116,6 +152,9 @@ class CCircle(ShapeBase):
         dx = pt.x() - cx
         dy = pt.y() - cy
         return dx * dx + dy * dy <= radius * radius
+
+    def type_name(self):
+        return "circle"
 
 
 
@@ -147,6 +186,10 @@ class CRectangle(ShapeBase):
     def contains(self, pt):
         return self._rect.contains(pt)
 
+    def type_name(self):
+        return "rect"
+
+
 
 class CEllipse(ShapeBase):
     def draw(self, p):
@@ -173,20 +216,24 @@ class CEllipse(ShapeBase):
         dy = pt.y() - cy
         return (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1.0
 
+    def type_name(self):
+        return "ellipse"
+
+
 
 class Group(IShape):
     def __init__(self, children: List[IShape]):
-        self._children: List[IShape] = list(children)
+        self._children = list(children)
         self._selected = False
 
-    # --- selection ---
+
     def set_selected(self, v):
         self._selected = bool(v)
 
     def is_selected(self):
         return self._selected
 
-    # --- colors: применяем ко всем детям ---
+
     def set_fill_color(self, color):
         for ch in self._children:
             ch.set_fill_color(color)
@@ -195,7 +242,7 @@ class Group(IShape):
         for ch in self._children:
             ch.set_line_color(color)
 
-    # --- geometry helpers ---
+
     def rect(self):
         if not self._children:
             return QRect(0, 0, 0, 0)
@@ -216,45 +263,118 @@ class Group(IShape):
         return QRect(QPoint(left, top), QPoint(right, bottom)).normalized()
 
     def contains(self, pt):
-        # на этапе 1: попадание по любому ребёнку
         for ch in reversed(self._children):
             if ch.contains(pt):
                 return True
         return False
 
     def draw(self, p):
+        if not self._selected:
+            for ch in self._children:
+                ch.draw(p)
+            return
+
+        prev = [ch.is_selected() for ch in self._children]
+        for ch in self._children:
+            ch.set_selected(True)
+
         for ch in self._children:
             ch.draw(p)
 
-    def move(self, dx, dy, bounds):
-        # этап 1: просто двигаем всех детей (bounds-контроль будет на этапе 2)
+        for ch, old in zip(self._children, prev):
+            ch.set_selected(old)
+
+    def move(self, dx, dy, bounds = None):
+        if not self._children:
+            return
+
+        bbox = self.rect()
+        moved = bbox.translated(dx, dy)
+
+        # если bounds не передали — просто двигаем без ограничений
+        if bounds is not None:
+            bbox = self.rect()
+            moved = bbox.translated(dx, dy)
+
+            if moved.left() < bounds.left():
+                dx += bounds.left() - moved.left()
+            if moved.right() > bounds.right():
+                dx -= moved.right() - bounds.right()
+
+            if moved.top() < bounds.top():
+                dy += bounds.top() - moved.top()
+            if moved.bottom() > bounds.bottom():
+                dy -= moved.bottom() - bounds.bottom()
+
         for ch in self._children:
             ch.move(dx, dy, bounds)
 
     def change_size(self, d, bounds):
-        # этап 1: просто меняем размер у всех детей
-        for ch in self._children:
-            ch.change_size(d, bounds)
+        return
 
     def set_rect(self, rect, bounds=None):
-        """
-        Чтобы Canvas мог ресайзить группу, делаем простую интерпретацию:
-        set_rect двигает группу так, чтобы её topLeft совпал с rect.topLeft.
-        (Нормальный resize группы будем делать на этапе 2/дальше, если нужно.)
-        """
         cur = self.rect()
         dx = rect.left() - cur.left()
         dy = rect.top() - cur.top()
-        self.move(dx, dy, bounds if bounds is not None else QRect())
+        self.move(dx, dy, bounds)
 
-    # удобный доступ для ungroup
     def children(self):
         return list(self._children)
 
+    def type_name(self):
+        return "group"
+
+    def save(self, stream):
+        stream.write(f"{len(self._children)}\n")
+        for ch in self._children:
+            stream.write(f"{ch.type_name()}\n")
+            ch.save(stream)
+
+    def load(self, stream, factory):
+        self._selected = False
+        self._children = []
+
+        line = stream.readline()
+        if not line:
+            raise ValueError("Неожиданный конец файла при чтении группы (count).")
+
+        n = int(line.strip())
+
+        for _ in range(n):
+            t = stream.readline()
+            if not t:
+                raise ValueError("Неожиданный конец файла при чтении типа дочернего объекта группы.")
+            type_name = t.strip()
+
+            child = factory.create(type_name)
+            child.load(stream,factory)
+            self._children.append(child)
+
+
+class ShapeFactory:
+    def __init__(self):
+        self._creators = {}
+
+    def register(self, type_name, creator):
+        self._creators[type_name] = creator
+
+    def create(self, type_name):
+        if type_name not in self._creators:
+            raise ValueError(f"Неизвестный тип фигуры в файле: {type_name}")
+        return self._creators[type_name]()
+
+    def type_names(self):
+        return list(self._creators.keys())
+
+
+
+
+
 
 class MyStorage:
-    def __init__(self):
+    def __init__(self, factory):
         self._items: List[IShape] = []
+        self._factory = factory
 
     def add(self, obj):
         if not isinstance(obj, IShape):
@@ -280,6 +400,416 @@ class MyStorage:
     def items(self):
         return self._items
 
+    def selected_items(self):
+        return [o for o in self._items if o.is_selected()]
+
+
+
+    def remove(self, obj):
+        for i, o in enumerate(self._items):
+            if o is obj:
+                del self._items[i]
+                return True
+        return False
+
+    def save_to_file(self, path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"{len(self._items)}\n")
+            for obj in self._items:
+                f.write(f"{obj.type_name()}\n")
+                obj.save(f)
+
+    def load_from_file(self, path):
+        with open(path, "r", encoding="utf-8") as f:
+            header = f.readline()
+            if not header:
+                raise ValueError("Пустой файл")
+
+            count = int(header.strip())
+            items = []
+
+            for _ in range(count):
+                t = f.readline()
+                if not t:
+                    raise ValueError("Ошибка чтения")
+                type_name = t.strip()
+
+                obj = self._factory.create(type_name)
+                obj.load(f,self._factory)
+                items.append(obj)
+
+        self._items = items
+        self.clear_selection()
+
+    def index_of(self, obj):
+        for i, o in enumerate(self._items):
+            if o is obj:
+                return i
+        return -1
+
+    def insert(self, index, obj):
+        self._items.insert(index, obj)
+
+    def remove_many(self, objs):
+        obj_set = set(objs)
+        self._items = [o for o in self._items if o not in obj_set]
+
+
+
+
+
+
+
+# команды ундо
+
+
+
+class GroupSelectedCommand(QUndoCommand):
+    def __init__(self, storage, canvas):
+        super().__init__()
+        self._storage = storage
+        self._canvas = canvas
+
+        self._children = storage.selected_items()
+        self._indices = [(storage.index_of(o), o) for o in self._children]
+        self._indices.sort(key=lambda x: x[0])
+
+        self._group = None
+        self._insert_index = (
+            self._indices[0][0]
+            if self._indices and self._indices[0][0] >= 0
+            else len(storage.items())
+        )
+
+    def redo(self):
+        if len(self._children) < 2:
+            return
+
+        for ch in self._children:
+            ch.set_selected(False)
+
+        if self._group is None:
+            self._group = Group(self._children)
+
+        self._storage.remove_many(self._children)
+        self._storage.insert(self._insert_index, self._group)
+
+        self._storage.clear_selection()
+        self._group.set_selected(True)
+
+        self._canvas.update()
+
+    def undo(self):
+        if not self._group:
+            return
+
+        if self._storage.index_of(self._group) < 0:
+            return
+
+        self._storage.remove(self._group)
+
+
+        for idx, obj in self._indices:
+            self._storage.insert(idx, obj)
+
+        self._storage.clear_selection()
+        for _, obj in self._indices:
+            obj.set_selected(True)
+
+        self._canvas.update()
+
+
+
+
+class UngroupSelectedCommand(QUndoCommand):
+    def __init__(self, storage, canvas):
+        super().__init__()
+        self._storage = storage
+        self._canvas = canvas
+
+        self._group = None
+        for o in storage.selected_items():
+            if isinstance(o, Group):
+                self._group = o
+                break
+
+        self._index = storage.index_of(self._group)
+        self._children = self._group.children() if self._group else []
+
+    def redo(self):
+        if not self._group or self._index < 0 or not self._children:
+            return
+
+        self._storage.remove(self._group)
+
+        for i, ch in enumerate(self._children):
+            self._storage.insert(self._index + i, ch)
+
+        self._storage.clear_selection()
+        for ch in self._children:
+            ch.set_selected(True)
+
+        self._canvas.update()
+
+    def undo(self):
+        if not self._group or self._index < 0 or not self._children:
+            return
+        self._storage.remove_many(self._children)
+
+        self._storage.clear_selection()
+        self._group.set_selected(True)
+        self._storage.insert(self._index, self._group)
+
+        self._canvas.update()
+
+class DeleteSelectedCommand(QUndoCommand):
+    def __init__(self, storage, canvas):
+        super().__init__()
+        self._storage = storage
+        self._canvas = canvas
+
+        self._objs = storage.selected_items()
+
+        self._indices = [(storage.index_of(o), o) for o in self._objs]
+        self._indices.sort(key=lambda x: x[0])
+
+    def redo(self):
+
+        self._storage.remove_many(self._objs)
+        self._canvas.update()
+
+    def undo(self):
+
+
+        for idx, obj in self._indices:
+            if idx < 0:
+                self._storage.add(obj)
+            else:
+                self._storage.insert(idx, obj)
+
+        self._storage.clear_selection()
+        for _, obj in self._indices:
+            obj.set_selected(True)
+
+        self._canvas.update()
+
+class CreateShapeCommand(QUndoCommand):
+    def __init__(self, storage, canvas, shape):
+        super().__init__()
+        self._storage = storage
+        self._canvas = canvas
+        self._shape = shape
+
+    def redo(self):
+        self._storage.add(self._shape)
+
+        self._storage.clear_selection()
+        self._shape.set_selected(True)
+        self._canvas.update()
+
+    def undo(self):
+        self._storage.remove(self._shape)
+        self._canvas.update()
+
+
+
+class MoveSelectedCommand(QUndoCommand):
+    def __init__(self, storage, canvas, items, start_positions, end_positions):
+        super().__init__()
+        self._storage = storage
+        self._canvas = canvas
+        self._items = items
+        self._start = start_positions
+        self._end = end_positions
+
+    def redo(self):
+        bounds = self._canvas.rect()
+        for sh in self._items:
+            sh.set_rect(self._end[sh], bounds)
+        self._canvas.update()
+
+    def undo(self):
+        bounds = self._canvas.rect()
+        for sh in self._items:
+            sh.set_rect(self._start[sh], bounds)
+        self._canvas.update()
+
+
+def _flatten_shapes(items):
+    out = []
+    for it in items:
+        if isinstance(it, Group):
+            out.extend(_flatten_shapes(it.children()))
+        else:
+            out.append(it)
+    return out
+
+
+
+class SetFillColorCommand(QUndoCommand):
+    def __init__(self, storage, canvas, new_color):
+        super().__init__()
+        self._storage = storage
+        self._canvas = canvas
+        self._new = QColor(new_color)
+
+        self._items = _flatten_shapes(storage.selected_items())
+        self._old = {sh: sh.fill_color() for sh in self._items}
+
+    def redo(self):
+        if not self._items:
+            return
+        for sh in self._items:
+            sh.set_fill_color(self._new)
+        self._canvas.update()
+
+    def undo(self):
+        if not self._items:
+            return
+        for sh in self._items:
+            sh.set_fill_color(self._old[sh])
+        self._canvas.update()
+
+
+class SetLineColorCommand(QUndoCommand):
+    def __init__(self, storage, canvas, new_color):
+        super().__init__()
+        self._storage = storage
+        self._canvas = canvas
+        self._new = QColor(new_color)
+
+        self._items = _flatten_shapes(storage.selected_items())
+        self._old = {sh: sh.line_color() for sh in self._items}
+
+    def redo(self):
+        if not self._items:
+            return
+        for sh in self._items:
+            sh.set_line_color(self._new)
+        self._canvas.update()
+
+    def undo(self):
+        if not self._items:
+            return
+        for sh in self._items:
+            sh.set_line_color(self._old[sh])
+        self._canvas.update()
+
+
+
+
+class MoveByKeyCommand(QUndoCommand):
+    def __init__(self, storage, canvas, dx, dy):
+        super().__init__()
+        self._storage = storage
+        self._canvas = canvas
+        self._dx = dx
+        self._dy = dy
+
+        self._items = storage.selected_items()
+        self._start = {sh: sh.rect() for sh in self._items}
+        self._end = None
+
+    def redo(self):
+        if not self._items:
+            return
+
+        bounds = self._canvas.rect()
+
+        if self._end is None:
+            for sh in self._items:
+                sh.move(self._dx, self._dy, bounds)
+            self._end = {sh: sh.rect() for sh in self._items}
+        else:
+            for sh in self._items:
+                sh.set_rect(self._end[sh], bounds)
+
+        self._canvas.update()
+
+    def undo(self):
+        if not self._items:
+            return
+        bounds = self._canvas.rect()
+        for sh in self._items:
+            sh.set_rect(self._start[sh], bounds)
+        self._canvas.update()
+
+
+
+class ResizeByKeyCommand(QUndoCommand):
+    def __init__(self, storage, canvas, d):
+        super().__init__()
+        self._storage = storage
+        self._canvas = canvas
+        self._d = d
+
+        self._items = storage.selected_items()
+        self._start = {sh: sh.rect() for sh in self._items}
+        self._end = None
+
+    def redo(self):
+        if not self._items:
+            return
+
+        bounds = self._canvas.rect()
+
+        if self._end is None:
+            for sh in self._items:
+                sh.change_size(self._d, bounds)
+
+            self._end = {sh: sh.rect() for sh in self._items}
+
+            if all(self._end[sh] == self._start[sh] for sh in self._items):
+                self.setObsolete(True)
+                return
+        else:
+            for sh in self._items:
+                sh.set_rect(self._end[sh], bounds)
+
+        self._canvas.update()
+
+    def undo(self):
+        if not self._items or self.isObsolete():
+            return
+
+        bounds = self._canvas.rect()
+        for sh in self._items:
+            sh.set_rect(self._start[sh], bounds)
+
+        self._canvas.update()
+
+class ResizeByHandleCommand(QUndoCommand):
+    def __init__(self, storage, canvas, items, start_rects, end_rects):
+        super().__init__()
+        self._storage = storage
+        self._canvas = canvas
+        self._items = list(items)
+        self._start = dict(start_rects)
+        self._end = dict(end_rects)
+
+        if all(self._start[sh] == self._end[sh] for sh in self._items):
+            self.setObsolete(True)
+
+    def redo(self):
+        if not self._items or self.isObsolete():
+            return
+        bounds = self._canvas.rect()
+        for sh in self._items:
+            sh.set_rect(self._end[sh], bounds)
+        self._canvas.update()
+
+    def undo(self):
+        if not self._items or self.isObsolete():
+            return
+        bounds = self._canvas.rect()
+        for sh in self._items:
+            sh.set_rect(self._start[sh], bounds)
+        self._canvas.update()
+
+
+
+
+#КАНВАС
 
 
 
@@ -298,8 +828,10 @@ class Canvas(QWidget):
         self._drag_start = QPoint()
         self._original_rect = QRect()
 
+        self._move_start_rects = None
 
-
+        self._resize_start_rects = None
+        self._resize_items = None
 
     def _square_for_circle(self, fixed_point, pos):
         dx = pos.x() - fixed_point.x()
@@ -335,6 +867,9 @@ class Canvas(QWidget):
             if shape.is_selected():
                 self._draw_frame(qp, shape)
 
+        if self._mode == "creating" and self._active_shape:
+            self._active_shape.draw(qp)
+            self._draw_frame(qp, self._active_shape)
 
 
 
@@ -346,8 +881,9 @@ class Canvas(QWidget):
         qp.drawRect(r)
         qp.setBrush(Qt.black)
 
-        for h in self._handles(shape):
-            qp.drawRect(h)
+        if not isinstance(shape, Group):
+            for h in self._handles(shape):
+                qp.drawRect(h)
 
     def _handles(self, shape):
         s = self.HANDLE_SIZE
@@ -390,6 +926,12 @@ class Canvas(QWidget):
             self._drag_start = pos
             self._original_rect = shape.rect()
             self.update()
+
+
+            items = [sh for sh in self._storage.selected_items() if not isinstance(sh, Group)]
+            self._resize_items = items
+            self._resize_start_rects = {sh: sh.rect() for sh in items}
+
             return
 
 
@@ -416,7 +958,7 @@ class Canvas(QWidget):
             self._mode = "moving"
             self._active_shape = target
             self._drag_start = pos
-
+            self._move_start_rects = {sh: sh.rect()for sh in self._storage.selected_items()}
         self.update()
 
 
@@ -477,9 +1019,62 @@ class Canvas(QWidget):
             return
 
     def mouseReleaseEvent(self, event):
+        if self._mode == "creating" and self._active_shape:
+            r = self._active_shape.rect()
+
+            if r.width() < ShapeBase._MIN_SIZE or r.height() < ShapeBase._MIN_SIZE:
+                self._active_shape = None
+                self._mode = "idle"
+                self.update()
+                return
+
+            cmd = CreateShapeCommand(self._storage, self, self._active_shape)
+            self._main_window._undo.push(cmd)
+
+            self._active_shape = None
+            self._mode = "idle"
+            self.update()
+            return
+
+        if self._mode == "moving" and self._move_start_rects:
+            end_rects = {
+                sh: sh.rect() for sh in self._storage.selected_items() if sh in self._move_start_rects}
+
+            moved = any(end_rects[sh] != self._move_start_rects[sh] for sh in end_rects)
+
+            if moved:
+                cmd = MoveSelectedCommand(
+                    self._storage,
+                    self,
+                    list(end_rects.keys()),
+                    self._move_start_rects,
+                    end_rects
+                )
+                self._main_window._undo.push(cmd)
+
+            self._move_start_rects = None
+
+        if self._mode == "resizing" and self._resize_start_rects and self._resize_items:
+            end_rects = {sh: sh.rect() for sh in self._resize_items}
+
+            cmd = ResizeByHandleCommand(
+                self._storage,
+                self,
+                self._resize_items,
+                self._resize_start_rects,
+                end_rects
+            )
+
+            if not cmd.isObsolete():
+                self._main_window._undo.push(cmd)
+
+            self._resize_start_rects = None
+            self._resize_items = None
+
         self._mode = "idle"
         self._active_shape = None
         self._active_handle = None
+
 
 
     def _hit_shape(self, pos):
@@ -492,6 +1087,8 @@ class Canvas(QWidget):
         for shape in reversed(self._storage.items()):
             if not shape.is_selected():
                 continue
+            if isinstance(shape, Group):
+                continue
             for idx, h in enumerate(self._handles(shape)):
                 if h.contains(pos):
                     return shape, idx
@@ -502,15 +1099,12 @@ class Canvas(QWidget):
         rect = QRect(pos, pos)
         t = self._main_window.current_shape_type
 
-        if t == "circle":
-            s = CCircle(rect)
-        elif t == "rect":
-            s = CRectangle(rect)
-        else:
-            s = CEllipse(rect)
+        s = self._main_window._factory.create(t)
+        s.set_rect(rect)
 
+        self._storage.clear_selection()
         s.set_selected(True)
-        self._storage.add(s)
+
 
         self._mode = "creating"
         self._active_shape = s
@@ -532,7 +1126,7 @@ class Canvas(QWidget):
         if idx == 3:
             return QRect(QPoint(pos.x(), y1), QPoint(x2, pos.y())).normalized()
 
-        return orig
+
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -543,32 +1137,81 @@ class Canvas(QWidget):
         handled = False
 
         if key == Qt.Key_Left:
-            self._storage.for_each_selected(lambda sh: sh.move(-move_s, 0, bounds))
+            cmd = MoveByKeyCommand(self._storage, self, -move_s, 0)
+            self._main_window._undo.push(cmd)
             handled = True
+
         elif key == Qt.Key_Right:
-            self._storage.for_each_selected(lambda sh: sh.move(move_s, 0, bounds))
+            cmd = MoveByKeyCommand(self._storage, self, move_s, 0)
+            self._main_window._undo.push(cmd)
             handled = True
+
         elif key == Qt.Key_Up:
-            self._storage.for_each_selected(lambda sh: sh.move(0, -move_s, bounds))
+            cmd = MoveByKeyCommand(self._storage, self, 0, -move_s)
+            self._main_window._undo.push(cmd)
             handled = True
+
         elif key == Qt.Key_Down:
-            self._storage.for_each_selected(lambda sh: sh.move(0, move_s, bounds))
+            cmd = MoveByKeyCommand(self._storage, self, 0, move_s)
+            self._main_window._undo.push(cmd)
             handled = True
-
         elif key in (Qt.Key_Plus, Qt.Key_Equal):
-            self._storage.for_each_selected(lambda sh: sh.change_size(size_s, bounds))
-            handled = True
-        elif key == Qt.Key_Minus:
-            self._storage.for_each_selected(lambda sh: sh.change_size(-size_s, bounds))
+            cmd = ResizeByKeyCommand(self._storage, self, size_s)
+            self._main_window._undo.push(cmd)
             handled = True
 
-        elif key == Qt.Key_Delete:
-            self._storage.remove_selected()
+        elif key == Qt.Key_Minus:
+            cmd = ResizeByKeyCommand(self._storage, self, -size_s)
+            self._main_window._undo.push(cmd)
             handled = True
 
         if handled:
             self.update()
         super().keyPressEvent(event)
+
+
+
+
+
+class PluginAPI:
+    def __init__(self):
+        self.Qt = Qt
+        self.QRect = QRect
+        self.QPoint = QPoint
+        self.QColor = QColor
+        self.QPen = QPen
+        self.QBrush = QBrush
+
+        self.IShape = IShape
+        self.ShapeBase = ShapeBase
+
+
+def load_py_plugins(factory, folder="plugins"):
+    api = PluginAPI()
+
+    for fn in os.listdir(folder):
+        if not fn.endswith(".py"):
+            continue
+
+        path = os.path.join(folder, fn)
+        mod_name = f"plugin_{os.path.splitext(fn)[0]}"
+
+        spec = importlib.util.spec_from_file_location(mod_name, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        if hasattr(mod, "register"):
+            mod.register(factory, api)
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -578,7 +1221,18 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("SUPER PAINT 3000--")
         self.resize(900, 600)
 
-        self._storage = MyStorage()
+
+        self._factory = ShapeFactory()
+        self._factory.register("circle", lambda: CCircle(QRect(0, 0, 10, 10)))
+        self._factory.register("rect", lambda: CRectangle(QRect(0, 0, 10, 10)))
+        self._factory.register("ellipse", lambda: CEllipse(QRect(0, 0, 10, 10)))
+        self._factory.register("group", lambda: Group([]))
+
+        load_py_plugins(self._factory, "plugins")
+
+        self._undo = QUndoStack(self)
+
+        self._storage = MyStorage(self._factory)
         self.current_shape_type = "circle"
 
         self._canvas = Canvas(self._storage, self)
@@ -586,7 +1240,10 @@ class MainWindow(QMainWindow):
 
         self._create_actions()
         self._create_toolbar()
-        self.addAction(self.act_delete)
+
+
+
+
 
     def _set_type(self, t):
         self.current_shape_type = t
@@ -594,24 +1251,45 @@ class MainWindow(QMainWindow):
     def _create_actions(self):
 
         self.act_select = QAction("Выделение", self, checkable=True)
-        self.act_circle = QAction("Круг", self, checkable=True)
-        self.act_rect = QAction("Прямоугольник", self, checkable=True)
-        self.act_ellipse = QAction("Эллипс", self, checkable=True)
-
-
-        self.act_circle.setChecked(True)
-
-        group = QActionGroup(self)
-        group.setExclusive(True)
-        group.addAction(self.act_select)
-        group.addAction(self.act_circle)
-        group.addAction(self.act_rect)
-        group.addAction(self.act_ellipse)
-
         self.act_select.triggered.connect(lambda: self._set_type("select"))
-        self.act_circle.triggered.connect(lambda: self._set_type("circle"))
-        self.act_rect.triggered.connect(lambda: self._set_type("rect"))
-        self.act_ellipse.triggered.connect(lambda: self._set_type("ellipse"))
+
+        self.shape_action_group = QActionGroup(self)
+        self.shape_action_group.setExclusive(True)
+        self.shape_action_group.addAction(self.act_select)
+
+        # --- динамические инструменты для фигур ---
+        self.shape_actions = {}
+
+        # красивое имя на кнопку (если нет — будет как type_name)
+        title_map = {
+            "circle": "Круг",
+            "rect": "Прямоугольник",
+            "ellipse": "Эллипс",
+            "triangle": "Треугольник",  # можно не писать — но так красивее
+        }
+
+        for t in self._factory.type_names():
+            if t == "group":
+                continue  # group не инструмент рисования
+            if t == "shape_base":
+                continue
+
+            act = QAction(title_map.get(t, t), self, checkable=True)
+            act.triggered.connect(lambda checked=False, tt=t: self._set_type(tt))
+
+            self.shape_action_group.addAction(act)
+            self.shape_actions[t] = act
+
+        # что выбрано по умолчанию
+        if "circle" in self.shape_actions:
+            self.shape_actions["circle"].setChecked(True)
+            self.current_shape_type = "circle"
+        else:
+            self.act_select.setChecked(True)
+            self.current_shape_type = "select"
+
+
+
 
 
         self.act_fill = QAction("Заливка...", self)
@@ -626,37 +1304,112 @@ class MainWindow(QMainWindow):
         self.act_delete.setShortcut(QKeySequence.Delete)
         self.act_delete.triggered.connect(self._delete_selected)
 
+        self.act_group = QAction("Группировать", self)
+        self.act_group.triggered.connect(self._group_selected)
+
+        self.act_ungroup = QAction("Разгруппировать", self)
+        self.act_ungroup.triggered.connect(self._ungroup_selected)
+
+        self.act_save = QAction("Сохранить...", self)
+        self.act_save.setShortcut(QKeySequence.Save)
+        self.act_save.triggered.connect(self._save_project)
+
+        self.act_open = QAction("Открыть...", self)
+        self.act_open.setShortcut(QKeySequence.Open)
+        self.act_open.triggered.connect(self._open_project)
+
+        self.act_undo = self._undo.createUndoAction(self, "Отменить")
+        self.act_undo.setShortcut(QKeySequence.Undo)
+
+
+
+
     def _create_toolbar(self):
         toolbar = QToolBar("Инструменты", self)
         self.addToolBar(toolbar)
 
-        toolbar.addAction(self.act_select)
+        toolbar.addAction(self.act_undo)
         toolbar.addSeparator()
-        toolbar.addAction(self.act_circle)
-        toolbar.addAction(self.act_rect)
-        toolbar.addAction(self.act_ellipse)
+        toolbar.addAction(self.act_select)
+
+        for t, act in self.shape_actions.items():
+            toolbar.addAction(act)
+
         toolbar.addSeparator()
         toolbar.addAction(self.act_fill)
         toolbar.addAction(self.act_line)
 
+        toolbar.addSeparator()
+        toolbar.addAction(self.act_group)
+        toolbar.addAction(self.act_ungroup)
+
+        toolbar.addSeparator()
+        toolbar.addAction(self.act_open)
+        toolbar.addAction(self.act_save)
+
+        toolbar.addSeparator()
+        toolbar.addAction(self.act_delete)
+        self.addAction(self.act_delete)
+
+        self.addAction(self.act_undo)
+
+
+
 
     def _fill_color(self):
+        if not self._storage.selected_items():
+            return
         color = QColorDialog.getColor(parent=self, title="Цвет заливки")
         if not color.isValid():
             return
-        self._storage.for_each_selected(lambda o: o.set_fill_color(color))
-        self._canvas.update()
+
+        cmd = SetFillColorCommand(self._storage, self._canvas, color)
+        if any(cmd._old[sh] != cmd._new for sh in cmd._items):
+            self._undo.push(cmd)
 
     def _line_color(self):
+        if not self._storage.selected_items():
+            return
         color = QColorDialog.getColor(parent=self, title="Цвет контура")
         if not color.isValid():
             return
-        self._storage.for_each_selected(lambda o: o.set_line_color(color))
-        self._canvas.update()
+
+        cmd = SetLineColorCommand(self._storage, self._canvas, color)
+        if any(cmd._old[sh] != cmd._new for sh in cmd._items):
+            self._undo.push(cmd)
+
+
 
     def _delete_selected(self):
-        self._storage.remove_selected()
+        cmd = DeleteSelectedCommand(self._storage, self._canvas)
+        self._undo.push(cmd)
+
+    def _group_selected(self):
+        cmd = GroupSelectedCommand(self._storage, self._canvas)
+        if len(self._storage.selected_items()) >= 2:
+            self._undo.push(cmd)
+
+    def _ungroup_selected(self):
+        cmd = UngroupSelectedCommand(self._storage, self._canvas)
+        if any(isinstance(o, Group) for o in self._storage.selected_items()):
+            self._undo.push(cmd)
+
+    def _save_project(self):
+        path, f = QFileDialog.getSaveFileName(self,"Сохранить проект","","Проект (*.txt)")
+        if not path:
+            return
+        self._storage.save_to_file(path)
+
+
+    def _open_project(self):
+        path, f = QFileDialog.getOpenFileName(self,"Открыть проект","","Проект (*.txt)")
+        if not path:
+            return
+        self._storage.load_from_file(path)
         self._canvas.update()
+
+
+
 
 
 
