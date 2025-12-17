@@ -5,7 +5,6 @@ def register(factory, api):
     Qt = api.Qt
     QRect = api.QRect
     QPoint = api.QPoint
-    QColor = api.QColor
     QPen = api.QPen
     QBrush = api.QBrush
     ShapeBase = api.ShapeBase
