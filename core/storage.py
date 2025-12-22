@@ -74,24 +74,40 @@ class MyStorage(Subject):
                 f.write(f"{obj.type_name()}\n")
                 obj.save(f)
 
+    def _iter_tree(self, obj):
+        yield obj
+        if hasattr(obj, "children") and callable(obj.children):
+            for ch in obj.children():
+                yield from self._iter_tree(ch)
+
     def load_from_file(self, path):
         with open(path, "r", encoding="utf-8") as f:
             header = f.readline()
-            if not header:
-                raise ValueError("Пустой файл")
+
 
             count = int(header.strip())
             items = []
 
             for _ in range(count):
                 t = f.readline()
-                if not t:
-                    raise ValueError("Ошибка чтения")
                 type_name = t.strip()
 
                 obj = self._factory.create(type_name)
                 obj.load(f, self._factory)
                 items.append(obj)
+
+        id_map = {}
+        for root in items:
+            for node in self._iter_tree(root):
+                if hasattr(node, "id") and callable(node.id):
+                    sid = node.id()
+                    if sid:
+                        id_map[sid] = node
+
+        for root in items:
+            for node in self._iter_tree(root):
+                if hasattr(node, "resolve_endpoints") and callable(node.resolve_endpoints):
+                    node.resolve_endpoints(id_map)
 
         self._items = items
         self.clear_selection()

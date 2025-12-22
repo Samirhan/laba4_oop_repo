@@ -8,7 +8,7 @@ from core.observer import use_move_token
 from shapes.base import ShapeBase
 from shapes.circle import CCircle
 from shapes.group import Group
-from shapes.arrow import ArrowShape
+from shapes.arrow import ArrowShape, BiArrowShape
 
 from commands.create import CreateShapeCommand
 from commands.move import MoveSelectedCommand, MoveByKeyCommand
@@ -124,7 +124,7 @@ class Canvas(QWidget):
         ctrl = bool(event.modifiers() & Qt.ControlModifier)
         tool = self._main_window.current_shape_type
 
-        if tool == "arrow":
+        if tool in ("arrow", "bi_arrow"):
             target = self._hit_shape(pos)
             if target is None:
                 return
@@ -140,10 +140,12 @@ class Canvas(QWidget):
                     self._arrow_source = None
                     return
 
-                from commands.create import CreateShapeCommand
-                ar = ArrowShape(self._arrow_source, target)
-                self._main_window._undo.push(CreateShapeCommand(self._storage, self, ar))
+                if tool == "arrow":
+                    ar = ArrowShape(self._arrow_source, target)
+                else:
+                    ar = BiArrowShape(self._arrow_source, target)
 
+                self._main_window._undo.push(CreateShapeCommand(self._storage, self, ar))
 
                 self._arrow_source = None
                 self.update()
@@ -375,8 +377,6 @@ class Canvas(QWidget):
 
     def keyPressEvent(self, event):
 
-
-
         key = event.key()
         bounds = self.rect()
         move_s = 5
@@ -426,11 +426,10 @@ class Canvas(QWidget):
 
 
     def _is_arrow(self, o):
-        return hasattr(o, "type_name") and callable(o.type_name) and o.type_name() == "arrow"
+        return hasattr(o, "type_name") and callable(o.type_name) and o.type_name() in ("arrow", "bi_arrow")
 
     def _expand_desc(self, roots):
         out = set()
-
         def find_chil(x):
             out.add(x)
             if hasattr(x, "children") and callable(x.children):
@@ -463,7 +462,8 @@ class Canvas(QWidget):
                 src = o.src()
                 dst = o.dst()
                 if src in inside and dst in inside:
-                    arrows.append({"src_obj": src, "dst_obj": dst})
+                    arrows.append({"src_obj": src, "dst_obj": dst, "type": o.type_name()})
+
 
         self._main_window._clipboard = {"roots": clip_roots, "arrows": arrows}
 

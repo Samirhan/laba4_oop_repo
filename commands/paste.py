@@ -11,6 +11,15 @@ def _children(o):
         return o.children()
     return None
 
+def _regen_ids(o):
+    if hasattr(o, "regenerate_id") and callable(o.regenerate_id):
+        o.regenerate_id()
+    ch = _children(o)
+    if ch:
+        for c in ch:
+            _regen_ids(c)
+
+
 
 def _deserialize_shape(factory, type_name, data):
     obj = factory.create(type_name)
@@ -48,7 +57,9 @@ class PasteCommand(QUndoCommand):
 
         for item in self._clipboard["roots"]:
             new_obj = _deserialize_shape(self._factory, item["type"], item["data"])
+            _regen_ids(new_obj)
             new_obj.move(dx, dy, bounds)
+
             new_roots.append(new_obj)
             _build_mapping(item["orig_root"], new_obj, mapping)
 
@@ -61,7 +72,10 @@ class PasteCommand(QUndoCommand):
             dst_new = mapping.get(dst_orig)
             if src_new is None or dst_new is None:
                 continue
-            arr = self._factory.create("arrow")
+            t = a.get("type", "arrow")
+            arr = self._factory.create(t)
+            if hasattr(arr, "regenerate_id") and callable(arr.regenerate_id):
+                arr.regenerate_id()
             arr.set_src_dst(src_new, dst_new)
             new_arrows.append(arr)
 

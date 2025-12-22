@@ -39,3 +39,6 @@ class IShape(ABC):
 
     @abstractmethod
     def load(self, stream, factory=None): ...
+
+    @abstractmethod
+    def id(self): ...

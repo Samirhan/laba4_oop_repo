@@ -10,6 +10,13 @@ class Group(Subject, IShape ):
         self._children = list(children)
         self._selected = False
         self._last_move_token = None
+        self._id = uuid.uuid4().hex
+
+    def id(self):
+        return self._id
+
+    def regenerate_id(self):
+        self._id = uuid.uuid4().hex
 
     def set_selected(self, v):
         self._selected = bool(v)
@@ -112,6 +119,7 @@ class Group(Subject, IShape ):
         return "group"
 
     def save(self, stream):
+        stream.write(f"{self._id}\n")
         stream.write(f"{len(self._children)}\n")
         for ch in self._children:
             stream.write(f"{ch.type_name()}\n")
@@ -121,10 +129,17 @@ class Group(Subject, IShape ):
         self._selected = False
         self._children = []
 
-        line = stream.readline()
+        first = stream.readline()
 
 
-        n = int(line.strip())
+        s = first.strip()
+        if s.isdigit():
+            self._id = uuid.uuid4().hex
+            n = int(s)
+        else:
+            self._id = s or uuid.uuid4().hex
+            line = stream.readline()
+            n = int(line.strip())
 
         for _ in range(n):
             t = stream.readline()

@@ -11,7 +11,8 @@ from shapes.circle import CCircle
 from shapes.rectangle import CRectangle
 from shapes.ellipse import CEllipse
 from shapes.group import Group
-from shapes.arrow import ArrowShape
+from shapes.arrow import ArrowShape, BiArrowShape
+
 
 
 from ui.canvas import Canvas
@@ -35,6 +36,7 @@ class MainWindow(QMainWindow):
         self._factory.register("ellipse", lambda: CEllipse(QRect(0, 0, 10, 10)))
         self._factory.register("group", lambda: Group([]))
         self._factory.register("arrow", lambda: ArrowShape(None, None))
+        self._factory.register("bi_arrow", lambda: BiArrowShape(None, None))
 
         load_py_plugins(self._factory, "plugins")
 
@@ -80,6 +82,10 @@ class MainWindow(QMainWindow):
         self.act_arrow.triggered.connect(lambda: self._set_type("arrow"))
         self.shape_action_group.addAction(self.act_arrow)
 
+        self.act_bi_arrow = QAction("Двунаправленная", self, checkable=True)
+        self.act_bi_arrow.triggered.connect(lambda: self._set_type("bi_arrow"))
+        self.shape_action_group.addAction(self.act_bi_arrow)
+
         self.shape_actions = {}
 
 
@@ -88,7 +94,8 @@ class MainWindow(QMainWindow):
             "rect": "Прямоугольник",
             "ellipse": "Эллипс",
             "triangle": "Треугольник",
-            "arrow": "Стрелка"
+            "arrow": "Стрелка",
+            "bi_arrow": "Двунаправленная"
         }
 
         for t in self._factory.type_names():
@@ -97,6 +104,8 @@ class MainWindow(QMainWindow):
             if t == "shape_base":
                 continue
             if t == "arrow":
+                continue
+            if t == "bi_arrow":
                 continue
 
             act = QAction(title_map.get(t, t), self, checkable=True)
@@ -154,6 +163,7 @@ class MainWindow(QMainWindow):
 
         toolbar.addAction(self.act_select)
         toolbar.addAction(self.act_arrow)
+        toolbar.addAction(self.act_bi_arrow)
 
         for t, act in self.shape_actions.items():
             toolbar.addAction(act)

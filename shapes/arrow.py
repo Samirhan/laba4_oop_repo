@@ -1,3 +1,5 @@
+import uuid
+
 from PySide6.QtCore import QRect, QPoint, QPointF, Qt
 from PySide6.QtGui import QPen, QColor
 from core.observer import IObserver, Subject, use_move_token
@@ -7,6 +9,12 @@ from core.IShape import IShape
 
 class ArrowShape(IShape):
     def __init__(self, src=None, dst=None):
+        self._id = uuid.uuid4().hex
+        self._pending_src_id = None
+        self._pending_dst_id = None
+
+
+
         self._src = None
         self._dst = None
 
@@ -14,18 +22,18 @@ class ArrowShape(IShape):
 
         self._selected = False
         self._line_color = Qt.black
-        self._fill_color = None       # у стрелки заливки нет
+        self._fill_color = None
         self._pen_width = 2
+        self._pen_min = 1
+        self._pen_max = 12
 
     def set_src_dst(self, src, dst):
-        # отписка
         if isinstance(self._src, Subject):
             self._src.remove_observer(self)
 
         self._src = src
         self._dst = dst
 
-        # подписка
         if isinstance(self._src, Subject):
             self._src.add_observer(self)
 
@@ -99,14 +107,8 @@ class ArrowShape(IShape):
 
         size = 10.0 + (self._pen_width - 2) * 2.0
 
-        left = type(b)(
-            b.x() - size * math.cos(ang - 0.5),
-            b.y() - size * math.sin(ang - 0.5),
-        )
-        right = type(b)(
-            b.x() - size * math.cos(ang + 0.5),
-            b.y() - size * math.sin(ang + 0.5),
-        )
+        left = type(b)(b.x() - size * math.cos(ang - 0.5),b.y() - size * math.sin(ang - 0.5),)
+        right = type(b)( b.x() - size * math.cos(ang + 0.5),b.y() - size * math.sin(ang + 0.5))
         p.drawLine(b, left)
         p.drawLine(b, right)
 
@@ -143,13 +145,11 @@ class ArrowShape(IShape):
         pass
 
     def move(self, dx, dy, bounds=None):
-        # стрелка "двигается" автоматически через src/dst
         pass
 
     def change_size(self, d, bounds=None):
         step = 1 if d > 0 else -1
-        self._pen_width = max(1, self._pen_width + step)
-
+        self._pen_width = max(self._pen_min, min(self._pen_max, self._pen_width + step))
 
     def fill_color(self):
         return self._fill_color
@@ -186,13 +186,109 @@ class ArrowShape(IShape):
 
 
     def save(self, f):
-        f.write("-1 -1\n")
+        f.write(f"{self._id}\n")
+        src_id = getattr(self._src, "id", lambda: "")()
+        dst_id = getattr(self._dst, "id", lambda: "")()
+        f.write(f"{src_id} {dst_id}\n")
 
     def load(self, f, factory):
-        f.readline()
+        first = f.readline()
+
+
+        parts = first.split()
+        if len(parts) == 2:
+            self._id = uuid.uuid4().hex
+            self._pending_src_id, self._pending_dst_id = parts[0], parts[1]
+        else:
+            self._id = first.strip() or uuid.uuid4().hex
+            second = f.readline()
+            sp = second.split() if second else []
+            if len(sp) >= 2:
+                self._pending_src_id, self._pending_dst_id = sp[0], sp[1]
+            else:
+                self._pending_src_id, self._pending_dst_id = "", ""
+
 
     def set_fill_color(self, color):
         self._fill_color = color
 
     def set_line_color(self, color):
         self._line_color = color
+
+    def id(self):
+        return self._id
+
+    def regenerate_id(self):
+        self._id = uuid.uuid4().hex
+
+    def pending_endpoint_ids(self):
+        if self._pending_src_id is None or self._pending_dst_id is None:
+            return None
+        return self._pending_src_id, self._pending_dst_id
+
+    def resolve_endpoints(self, id_map):
+        if self._pending_src_id is None or self._pending_dst_id is None:
+            return
+
+        src = id_map.get(self._pending_src_id)
+        dst = id_map.get(self._pending_dst_id)
+        if src is not None and dst is not None:
+            self.set_src_dst(src, dst)
+
+        self._pending_src_id = None
+        self._pending_dst_id = None
+
+
+class BiArrowShape(ArrowShape):
+    def type_name(self):
+        return "bi_arrow"
+
+    def set_src_dst(self, src, dst):
+        if self._src is not None and isinstance(self._src, Subject):
+            self._src.remove_observer(self)
+        if self._dst is not None and isinstance(self._dst, Subject):
+            self._dst.remove_observer(self)
+
+        self._src = src
+        self._dst = dst
+
+        if self._src is not None and isinstance(self._src, Subject):
+            self._src.add_observer(self)
+        if self._dst is not None and isinstance(self._dst, Subject):
+            self._dst.add_observer(self)
+
+    def on_subject_changed(self, who, event):
+        if not isinstance(event, dict) or event.get("type") != "moved":
+            return
+        if self._src is None or self._dst is None:
+            return
+
+        dx = event.get("dx", 0)
+        dy = event.get("dy", 0)
+        token = event.get("token", None)
+        bounds = event.get("bounds", None)
+
+        if who is self._src:
+            with use_move_token(token):
+                self._dst.move(dx, dy, bounds)
+        elif who is self._dst:
+            with use_move_token(token):
+                self._src.move(dx, dy, bounds)
+
+    def draw(self, p):
+        if self._src is None or self._dst is None:
+            return
+
+        cs = self._src.rect().center()
+        cd = self._dst.rect().center()
+
+        a = self._edge_point(self._src.rect(), cd)
+        b = self._edge_point(self._dst.rect(), cs)
+
+        color = QColor(Qt.red) if self._selected else self._line_color
+        pen = QPen(color, self._pen_width)
+        p.setPen(pen)
+
+        p.drawLine(a, b)
+        self._draw_head(p, a, b)
+        self._draw_head(p, b, a)

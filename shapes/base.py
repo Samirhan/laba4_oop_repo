@@ -10,11 +10,19 @@ class ShapeBase(Subject, IShape):
 
     def __init__(self, rect, line_color=Qt.black, fill_color=Qt.white):
         Subject.__init__(self)
+        self._id = uuid.uuid4().hex
         self._rect = QRect(rect).normalized()
         self._line_color = QColor(line_color)
         self._fill_color = QColor(fill_color)
         self._selected = False
         self._last_move_token = None
+
+    def id(self):
+        return self._id
+
+    def regenerate_id(self):
+        self._id = uuid.uuid4().hex
+
 
     def set_selected(self, v):
         self._selected = bool(v)
@@ -67,6 +75,8 @@ class ShapeBase(Subject, IShape):
         return "shape_base"
 
     def save(self, stream):
+        stream.write(f"{self._id}\n")
+
         r = self._rect
         stream.write(f"{r.left()} {r.top()} {r.width()} {r.height()}\n")
 
@@ -76,7 +86,13 @@ class ShapeBase(Subject, IShape):
         stream.write(f"{fc.red()} {fc.green()} {fc.blue()} {fc.alpha()}\n")
 
     def load(self, stream, factory=None):
+        first = stream.readline()
+
+
+
+        self._id = first.strip() or uuid.uuid4().hex
         x, y, w, h = map(int, stream.readline().split())
+
         self._rect = QRect(x, y, w, h).normalized()
 
         lr, lg, lb, la = map(int, stream.readline().split())
