@@ -1,15 +1,21 @@
+import uuid
+
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QPainter, QPen
 
+from core.observer import use_move_token
 from shapes.base import ShapeBase
 from shapes.circle import CCircle
 from shapes.group import Group
+from shapes.arrow import ArrowShape
 
 from commands.create import CreateShapeCommand
 from commands.move import MoveSelectedCommand, MoveByKeyCommand
 from commands.resize import ResizeByKeyCommand, ResizeByHandleCommand
-
+from PySide6.QtGui import QKeySequence
+from commands.paste import PasteCommand
+from io import StringIO
 
 class Canvas(QWidget):
     HANDLE_SIZE = 7
@@ -30,6 +36,12 @@ class Canvas(QWidget):
 
         self._resize_start_rects = None
         self._resize_items = None
+
+        self._arrow_source = None
+
+    def on_subject_changed(self, who, event):
+        if event in ("structure", "selection"):
+            self.update()
 
     def _square_for_circle(self, fixed_point, pos):
         dx = pos.x() - fixed_point.x()
@@ -112,12 +124,37 @@ class Canvas(QWidget):
         ctrl = bool(event.modifiers() & Qt.ControlModifier)
         tool = self._main_window.current_shape_type
 
+        if tool == "arrow":
+            target = self._hit_shape(pos)
+            if target is None:
+                return
+
+            if self._arrow_source is None:
+                self._arrow_source = target
+
+                self._storage.set_selection([target]) if hasattr(self._storage, "set_selection") else (
+                    self._storage.clear_selection(), target.set_selected(True))
+                self.update()
+            else:
+                if target is self._arrow_source:
+                    self._arrow_source = None
+                    return
+
+                from commands.create import CreateShapeCommand
+                ar = ArrowShape(self._arrow_source, target)
+                self._main_window._undo.push(CreateShapeCommand(self._storage, self, ar))
+
+
+                self._arrow_source = None
+                self.update()
+
+            return
+
         shape, idx = self._hit_handle(pos)
 
         if shape:
             if not shape.is_selected():
-                self._storage.clear_selection()
-                shape.set_selected(True)
+                self._storage.set_selection([shape])
 
             self._mode = "resizing"
             self._active_shape = shape
@@ -139,7 +176,6 @@ class Canvas(QWidget):
         if target is None:
             if tool == "select":
                 self._storage.clear_selection()
-                self.update()
                 return
 
             self._storage.clear_selection()
@@ -147,17 +183,19 @@ class Canvas(QWidget):
             return
 
         if ctrl:
-            target.set_selected(not target.is_selected())
+            self._storage.toggle_selection(target)
         else:
             if not target.is_selected():
-                self._storage.clear_selection()
-                target.set_selected(True)
+                self._storage.set_selection([target])
 
         if tool == "select":
             self._mode = "moving"
             self._active_shape = target
             self._drag_start = pos
-            self._move_start_rects = {sh: sh.rect()for sh in self._storage.selected_items()}
+
+        items = self._storage.selected_items()
+        self._move_start_rects = {sh: sh.rect() for sh in items}
+
         self.update()
 
 
@@ -212,7 +250,14 @@ class Canvas(QWidget):
             def _move(shape):
                 shape.move(dx, dy, bounds)
 
-            self._storage.for_each_selected(_move)
+
+            items = list(self._move_start_rects.keys()) if self._move_start_rects else self._storage.selected_items()
+
+            token = uuid.uuid4().hex
+            with use_move_token(token):
+                for sh, start_rect in self._move_start_rects.items():
+                    sh.move(dx, dy, self.rect())
+
             self._drag_start = pos
             self.update()
             return
@@ -236,8 +281,8 @@ class Canvas(QWidget):
             return
 
         if self._mode == "moving" and self._move_start_rects:
-            end_rects = {
-                sh: sh.rect() for sh in self._storage.selected_items() if sh in self._move_start_rects}
+            end_rects = {sh: sh.rect() for sh in self._move_start_rects.keys()}
+
 
             moved = any(end_rects[sh] != self._move_start_rects[sh] for sh in end_rects)
 
@@ -329,12 +374,22 @@ class Canvas(QWidget):
 
 
     def keyPressEvent(self, event):
+
+
+
         key = event.key()
         bounds = self.rect()
         move_s = 5
         size_s = 3
 
         handled = False
+
+        if event.matches(QKeySequence.Copy):
+            self._do_copy()
+            return
+        if event.matches(QKeySequence.Paste):
+            self._do_paste()
+            return
 
         if key == Qt.Key_Left:
             cmd = MoveByKeyCommand(self._storage, self, -move_s, 0)
@@ -368,3 +423,54 @@ class Canvas(QWidget):
         if handled:
             self.update()
         super().keyPressEvent(event)
+
+
+    def _is_arrow(self, o):
+        return hasattr(o, "type_name") and callable(o.type_name) and o.type_name() == "arrow"
+
+    def _expand_desc(self, roots):
+        out = set()
+
+        def find_chil(x):
+            out.add(x)
+            if hasattr(x, "children") and callable(x.children):
+                for ch in x.children():
+                    find_chil(ch)
+
+        for r in roots:
+            find_chil(r)
+        return out
+
+    def _do_copy(self):
+        sel = self._storage.selected_items()
+        roots = [o for o in sel if not self._is_arrow(o)]
+        if not roots:
+            self._main_window._clipboard = None
+            return
+
+        inside = self._expand_desc(roots)
+
+        clip_roots = []
+        for r in roots:
+            s = StringIO()
+            r.save(s)
+            clip_roots.append({"type": r.type_name(), "data": s.getvalue(), "orig_root": r})
+
+
+        arrows = []
+        for o in sel:
+            if self._is_arrow(o):
+                src = o.src()
+                dst = o.dst()
+                if src in inside and dst in inside:
+                    arrows.append({"src_obj": src, "dst_obj": dst})
+
+        self._main_window._clipboard = {"roots": clip_roots, "arrows": arrows}
+
+    def _do_paste(self):
+        clip = getattr(self._main_window, "_clipboard", None)
+        if not clip or not clip["roots"]:
+            return
+
+        cmd = PasteCommand(self._storage, self, self._main_window._factory, clip, offset=(20, 20))
+        self._main_window._undo.push(cmd)

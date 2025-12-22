@@ -1,11 +1,15 @@
 from PySide6.QtCore import QRect, QPoint
 
 from core.IShape import IShape
+from core.observer import Subject, get_move_token, use_move_token
+import uuid
 
-class Group(IShape):
+class Group(Subject, IShape ):
     def __init__(self, children):
+        Subject.__init__(self)
         self._children = list(children)
         self._selected = False
+        self._last_move_token = None
 
     def set_selected(self, v):
         self._selected = bool(v)
@@ -58,10 +62,17 @@ class Group(IShape):
             ch.set_selected(old)
 
     def move(self, dx, dy, bounds=None):
+        token = get_move_token() or uuid.uuid4().hex
+        if self._last_move_token == token:
+            return
+        self._last_move_token = token
+
         if not self._children:
             return
 
-        bbox = self.rect()
+        before = self.rect()
+
+        bbox = before
         moved = bbox.translated(dx, dy)
 
         if bounds is not None:
@@ -74,8 +85,15 @@ class Group(IShape):
             if moved.bottom() > bounds.bottom():
                 dy -= moved.bottom() - bounds.bottom()
 
-        for ch in self._children:
-            ch.move(dx, dy, bounds)
+        with use_move_token(token):
+            for ch in self._children:
+                ch.move(dx, dy, bounds)
+
+        after = self.rect()
+        adx = after.left() - before.left()
+        ady = after.top() - before.top()
+        if adx or ady:
+            self.notify_everyone({"type": "moved", "dx": adx, "dy": ady, "token": token, "bounds": bounds})
 
     def change_size(self, d, bounds=None):
         for ch in self._children:
@@ -115,3 +133,6 @@ class Group(IShape):
             child = factory.create(type_name)
             child.load(stream, factory)
             self._children.append(child)
+
+    def children(self):
+        return self._children

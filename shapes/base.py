@@ -2,15 +2,19 @@ from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor
 
 from core.IShape import IShape
+import uuid
+from core.observer import Subject, get_move_token
 
-class ShapeBase(IShape):
+class ShapeBase(Subject, IShape):
     _MIN_SIZE = 10
 
     def __init__(self, rect, line_color=Qt.black, fill_color=Qt.white):
+        Subject.__init__(self)
         self._rect = QRect(rect).normalized()
         self._line_color = QColor(line_color)
         self._fill_color = QColor(fill_color)
         self._selected = False
+        self._last_move_token = None
 
     def set_selected(self, v):
         self._selected = bool(v)
@@ -39,8 +43,20 @@ class ShapeBase(IShape):
         self._rect = new_rect
 
     def move(self, dx, dy, bounds=None):
+        token = get_move_token() or uuid.uuid4().hex
+        if self._last_move_token == token:
+            return
+        self._last_move_token = token
+
+        before = QRect(self._rect)
         moved = self._rect.translated(dx, dy)
         self.set_rect(moved, bounds)
+        after = QRect(self._rect)
+
+        adx = after.left() - before.left()
+        ady = after.top() - before.top()
+        if adx or ady:
+            self.notify_everyone({"type": "moved", "dx": adx, "dy": ady, "token": token, "bounds": bounds})
 
     def change_size(self, d, bounds):
         r = self._rect

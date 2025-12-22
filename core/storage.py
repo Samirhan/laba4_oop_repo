@@ -1,22 +1,49 @@
-from typing import List
 from core.IShape import IShape
+from core.observer import Subject
 
-class MyStorage:
+class MyStorage(Subject):
     def __init__(self, factory):
-        self._items: List[IShape] = []
+        super().__init__()
+        self._items = []
+
         self._factory = factory
 
     def add(self, obj):
         if not isinstance(obj, IShape):
             raise TypeError("MyStorage хранит только фигуры")
         self._items.append(obj)
+        self.notify_everyone("structure")
 
-    def remove_selected(self):
-        self._items = [o for o in self._items if not o.is_selected()]
+
 
     def clear_selection(self):
-        for o in self._items:
-            o.set_selected(False)
+        changed = False
+        for shape in self._items:
+            if shape.is_selected():
+                shape.set_selected(False)
+                changed = True
+        if changed:
+            self.notify_everyone("selection")
+
+    def set_selection(self, selected):
+        selected_set = set(selected)
+        changed = False
+        for shape in self._items:
+            if shape in selected_set:
+                should = True
+            else:
+                should = False
+            if shape.is_selected() != should:
+                shape.set_selected(should)
+                changed = True
+        if changed:
+            self.notify_everyone("selection")
+
+    def toggle_selection(self, shape):
+        if shape not in self._items:
+            return
+        shape.set_selected(not shape.is_selected())
+        self.notify_everyone("selection")
 
     def for_each_selected(self, func):
         for sh in self._items:
@@ -32,7 +59,11 @@ class MyStorage:
     def remove(self, obj):
         for i, o in enumerate(self._items):
             if o is obj:
-                del self._items[i]
+                was_selected = o.is_selected()
+                self._items.remove(o)
+                self.notify_everyone("structure")
+                if was_selected:
+                    self.notify_everyone("selection")
                 return True
         return False
 
@@ -64,6 +95,8 @@ class MyStorage:
 
         self._items = items
         self.clear_selection()
+        self.notify_everyone("structure")
+        self.notify_everyone("selection")
 
     def index_of(self, obj):
         for i, o in enumerate(self._items):
@@ -73,7 +106,12 @@ class MyStorage:
 
     def insert(self, index, obj):
         self._items.insert(index, obj)
+        self.notify_everyone("structure")
 
     def remove_many(self, objs):
         obj_set = set(objs)
         self._items = [o for o in self._items if o not in obj_set]
+        self.notify_everyone("structure")
+        self.notify_everyone("selection")
+
+

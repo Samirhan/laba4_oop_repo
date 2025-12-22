@@ -1,5 +1,5 @@
 import os, sys
-from PySide6.QtWidgets import QMainWindow, QColorDialog, QToolBar, QFileDialog
+from PySide6.QtWidgets import QMainWindow, QColorDialog, QToolBar, QFileDialog, QSplitter
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QUndoStack
 from PySide6.QtCore import QRect
 
@@ -11,19 +11,22 @@ from shapes.circle import CCircle
 from shapes.rectangle import CRectangle
 from shapes.ellipse import CEllipse
 from shapes.group import Group
+from shapes.arrow import ArrowShape
+
 
 from ui.canvas import Canvas
+from ui.storage_tree import StorageTree
+
 
 from commands.colors import SetFillColorCommand, SetLineColorCommand
 from commands.delete import DeleteSelectedCommand
 from commands.grouping import GroupSelectedCommand, UngroupSelectedCommand
 
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SUPER PAINT 3000--")
-        self.resize(900, 600)
+        self.resize(1200, 900)
 
 
         self._factory = ShapeFactory()
@@ -31,6 +34,7 @@ class MainWindow(QMainWindow):
         self._factory.register("rect", lambda: CRectangle(QRect(0, 0, 10, 10)))
         self._factory.register("ellipse", lambda: CEllipse(QRect(0, 0, 10, 10)))
         self._factory.register("group", lambda: Group([]))
+        self._factory.register("arrow", lambda: ArrowShape(None, None))
 
         load_py_plugins(self._factory, "plugins")
 
@@ -40,7 +44,18 @@ class MainWindow(QMainWindow):
         self.current_shape_type = "circle"
 
         self._canvas = Canvas(self._storage, self)
-        self.setCentralWidget(self._canvas)
+        self._storage.add_observer(self._canvas)
+
+        self._tree = StorageTree(self._storage, self)
+        self._storage.add_observer(self._tree)
+
+        splitter = QSplitter(self)
+        splitter.addWidget(self._tree)
+        splitter.addWidget(self._canvas)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        self.setCentralWidget(splitter)
 
         self._create_actions()
         self._create_toolbar()
@@ -54,13 +69,16 @@ class MainWindow(QMainWindow):
 
     def _create_actions(self):
 
-        self.act_select = QAction("Выделение", self, checkable=True)
-        self.act_select.triggered.connect(lambda: self._set_type("select"))
-
         self.shape_action_group = QActionGroup(self)
         self.shape_action_group.setExclusive(True)
+
+        self.act_select = QAction("Выделение", self, checkable=True)
+        self.act_select.triggered.connect(lambda: self._set_type("select"))
         self.shape_action_group.addAction(self.act_select)
 
+        self.act_arrow = QAction("Стрелка", self, checkable=True)
+        self.act_arrow.triggered.connect(lambda: self._set_type("arrow"))
+        self.shape_action_group.addAction(self.act_arrow)
 
         self.shape_actions = {}
 
@@ -69,13 +87,16 @@ class MainWindow(QMainWindow):
             "circle": "Круг",
             "rect": "Прямоугольник",
             "ellipse": "Эллипс",
-            "triangle": "Треугольник"
+            "triangle": "Треугольник",
+            "arrow": "Стрелка"
         }
 
         for t in self._factory.type_names():
             if t == "group":
                 continue
             if t == "shape_base":
+                continue
+            if t == "arrow":
                 continue
 
             act = QAction(title_map.get(t, t), self, checkable=True)
@@ -130,7 +151,9 @@ class MainWindow(QMainWindow):
 
         toolbar.addAction(self.act_undo)
         toolbar.addSeparator()
+
         toolbar.addAction(self.act_select)
+        toolbar.addAction(self.act_arrow)
 
         for t, act in self.shape_actions.items():
             toolbar.addAction(act)
@@ -195,7 +218,7 @@ class MainWindow(QMainWindow):
             self._undo.push(cmd)
 
     def _save_project(self):
-        path, f = QFileDialog.getSaveFileName(self,"Сохранить проект","","Проект (*.txt)")
+        path, f = QFileDialog.getSaveFileName(self,"Сохранить проект","saves","Проект (*.txt)")
         if not path:
             return
         self._storage.save_to_file(path)

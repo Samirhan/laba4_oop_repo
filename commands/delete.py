@@ -1,4 +1,5 @@
 from PySide6.QtGui import QUndoCommand
+from core.observer import Subject
 
 class DeleteSelectedCommand(QUndoCommand):
     def __init__(self, storage, canvas):
@@ -10,19 +11,30 @@ class DeleteSelectedCommand(QUndoCommand):
         self._indices = [(storage.index_of(o), o) for o in self._objs]
         self._indices.sort(key=lambda x: x[0])
 
+    def _is_arrow(self, o):
+        return getattr(o, "type_name", lambda: "")() == "arrow"
+
     def redo(self):
+        for o in self._objs:
+            if self._is_arrow(o):
+                src = getattr(o, "src", lambda: None)()
+                if isinstance(src, Subject):
+                    src.remove_observer(o)
+
         self._storage.remove_many(self._objs)
         self._canvas.update()
 
     def undo(self):
-        for idx, obj in self._indices:
-            if idx < 0:
-                self._storage.add(obj)
-            else:
-                self._storage.insert(idx, obj)
+        for idx, obj in reversed(self._indices):
+            self._storage.insert(idx, obj)
 
-        self._storage.clear_selection()
-        for _, obj in self._indices:
-            obj.set_selected(True)
+        for o in self._objs:
+            if self._is_arrow(o):
+                src = getattr(o, "src", lambda: None)()
+                if isinstance(src, Subject):
+                    src.add_observer(o)
+
+        present = [o for o in self._objs if o in self._storage.items()]
+        self._storage.set_selection(present)
 
         self._canvas.update()
